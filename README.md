@@ -8,4 +8,6 @@ The main features of the project will include:
 - An RTOS implementation using FreeRTOS, providing task scheduling and synchronization mechanisms for real-time execution of multiple tasks.
 - A driver for the ADXL345 accelerometer, enabling the measurement of three-axis acceleration data and implementation of motion detection and vibration analysis algorithms.
 - A user interface with a serial console interface for sending commands and receiving data from the STM32 board.
+
+
 If you're an employer or recruiter interested in evaluating my skills, feel free to review the source code & contact me on linkedin.
