@@ -47,12 +47,11 @@ extern "C" {
 /* Exported types ------------------------------------------------------------*/
 /* USER CODE BEGIN ET */
 typedef enum {
-	sMainMenu = 0,
-	sImuMeas,
-	sImuCalib,
-	sImuShow,
-	sAlarm,
-	sNoState
+	sMainMenu = 0, // Main menu state
+	sImuMeas,	   // IMU measurement state
+	sImuCalib,	   // IMU calibration state
+	sAlarm,		   // Alarm state
+	sLedBlink,	   // Led blink state
 } state_t;
 
 typedef enum {
@@ -64,6 +63,8 @@ typedef enum {
 	aCalibDone,
 	aInvalidImu,
 	aInvalidOption,
+	aLedBlink,
+	aImuMeas,
 	aNoAction
 } action_t;
 

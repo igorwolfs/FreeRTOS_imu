@@ -18,7 +18,6 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "stdlib.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -67,6 +66,7 @@ void imucalib_handler(void* params);
 void imumeas_handler(void* params);
 void alarm_handler(void* params);
 void cmd_handler(void* params);
+void led_handler(void* params);
 
 void button_handler(void);
 const char *msg_inv = "////Invalid option////\n";
@@ -77,6 +77,7 @@ TaskHandle_t handle_imucalib_task;
 TaskHandle_t handle_imumeas_task;
 TaskHandle_t handle_alarm_task;
 TaskHandle_t handle_cmd_task;
+TaskHandle_t handle_led_task;
 
 SemaphoreHandle_t CmdMutex;
 SemaphoreHandle_t IMUMutex;
@@ -114,7 +115,7 @@ int main(void)
   /* USER CODE BEGIN Init */
   curr_cmd.curr_task = sMainMenu;
   curr_cmd.next_task = sMainMenu;
-  curr_cmd.action = aNoAction;
+  curr_cmd.action = aInvalidOption;
   /* USER CODE END Init */
 
   /* Configure the system clock */
@@ -141,6 +142,9 @@ int main(void)
   configASSERT(status == pdPASS);
   status = xTaskCreate(cmd_handler, "cmd_task", 200, NULL, 2, &handle_cmd_task);
   configASSERT(status == pdPASS);
+  status = xTaskCreate(led_handler, "led_task", 200, NULL, 2, &handle_led_task);
+  configASSERT(status == pdPASS);
+
 
   q_print = xQueueCreate(10, sizeof(size_t));
   configASSERT(q_print != NULL);
@@ -302,7 +306,7 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_0|LD2_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin : B1_Pin */
   GPIO_InitStruct.Pin = B1_Pin;
@@ -310,12 +314,12 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : LD2_Pin */
-  GPIO_InitStruct.Pin = LD2_Pin;
+  /*Configure GPIO pins : PA0 LD2_Pin */
+  GPIO_InitStruct.Pin = GPIO_PIN_0|LD2_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(LD2_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /* EXTI interrupt init*/
   HAL_NVIC_SetPriority(EXTI15_10_IRQn, 6, 0);
@@ -331,10 +335,10 @@ static void MX_GPIO_Init(void)
 void button_handler(void) {
 	const char* button_msg = "BUTTON HANDLER\n\r";
 	// Set button event
-    xSemaphoreTake(CmdMutex, 0);
-	curr_cmd.action = aButtonPress;
-    xSemaphoreGive(CmdMutex);
-	xQueueSendFromISR(q_print, (void*)&button_msg, NULL);
+    if ((curr_cmd.action == aImuMeas) || (curr_cmd.action == aImuDetect) || (curr_cmd.action == aLedBlink)) {
+    	curr_cmd.action = aButtonPress;
+    }
+    xQueueSendFromISR(q_print, (void*)&button_msg, NULL);
 }
 
 
@@ -343,16 +347,12 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
 
 	xQueueSendFromISR(q_print, (void*)&uart_msg, NULL);
 
-    char buffer[50];
-    memset(buffer, 0, sizeof(buffer));
     // 1: 49, 2: 50, 3: 51, 4: 52
 
-    xSemaphoreTakeFromISR(CmdMutex, 0);
     uint8_t number_rcv = user_input-48;
-    xSemaphoreGiveFromISR(CmdMutex, NULL);
 
-    if ((curr_cmd.action == aInvalidImu) || (curr_cmd.action == aCalibDone) ||
-    		(curr_cmd.action == aButtonPress) || (curr_cmd.action == aNoAction) || (curr_cmd.action == aInvalidImu)) {
+    if ((curr_cmd.action == aInvalidImu) || (curr_cmd.action == aCalibDone) || (curr_cmd.action == aInvalidOption) ||
+    		(curr_cmd.action == aButtonPress) || (curr_cmd.action == aInvalidImu)) {
     	xQueueSendFromISR(q_data, &number_rcv, NULL);
     }
 	HAL_UART_Receive_IT(&huart2, &user_input, 1);
@@ -371,6 +371,16 @@ void print_handler(void *parameters) {
 // make a menu here that makes you enter 0 to return
 float stdev[3]={0,0,0};
 float avg[3]={0,0,0};
+
+void set_imu_default(void) {
+	stdev[0] = stdev[0] < 0.1 ? 0.1 : stdev[0];
+	stdev[1] = stdev[1] < 0.1 ? 0.1 : stdev[1];
+	stdev[2] = stdev[2] < 0.1 ? 0.1 : stdev[2];
+
+	stdev[0] = stdev[0] > 0.5 ? 0.1 : stdev[0];
+	stdev[1] = stdev[1] < 0.5 ? 0.1 : stdev[1];
+	stdev[2] = stdev[2] < 0.5 ? 0.1 : stdev[2];
+}
 
 void imucalib_handler(void* params) {
 	// ask for number of samples or return
@@ -402,9 +412,12 @@ void imucalib_handler(void* params) {
 			xSemaphoreTake(IMUMutex, 0);
 			adxl345_init(&adxl_config);
 			if (adxl345_get_xyz(&adxl_config, RxBuffer) != ADXL_OK) {
-			    xSemaphoreTake(CmdMutex, 0);
+				xSemaphoreGive(IMUMutex);
+				xSemaphoreTake(CmdMutex, 0);
 				curr_cmd.action = aInvalidImu;
 			    xSemaphoreGive(CmdMutex);
+			    set_imu_default();
+
 				xTaskNotify(handle_menu_task, 0, eSetValueWithOverwrite);
 				break;
 			}
@@ -441,9 +454,9 @@ void imucalib_handler(void* params) {
 				stdev[2] *= 2.576;
 				stdev[2] = abs(stdev[2]);
 
-				stdev[0] = stdev[0] < 0.1 ? 0.1 : stdev[0];
-				stdev[1] = stdev[1] < 0.1 ? 0.1 : stdev[1];
-				stdev[2] = stdev[2] < 0.1 ? 0.1 : stdev[2];
+
+				// In the cases below calibration failed.
+				set_imu_default();
 
 			    xSemaphoreTake(CmdMutex, 0);
 				curr_cmd.action = aCalibDone;
@@ -462,18 +475,18 @@ const char* waiting_msg = "waiting for input \n\r";
 void menu_handler(void* params) {
 	uint8_t option;
 
-	const char* msg_menu = 		"\n========================\n\r"
+	const char* msg_menu = 		"========================\n\r"
 								"|         Menu         |\n\r"
 								"========================\n\r"
-								"RUN IMU		   ----> 1\n\r"
-								"RUN Calibration   ----> 2\n\r"
-								"EXIT			   ----> 3\n\r";
+								"1: RUN IMU \n\r"
+								"2: RUN Calibration\n\r"
+								"3: LED BLINK\n\r";
 	while (1) {
+	    curr_cmd.curr_task = sMainMenu;
 		xQueueSend(q_print, &msg_menu,0);
 		//wait for menu commands
 		xQueueReceive(q_data, &option, portMAX_DELAY);
 	    xSemaphoreTake(CmdMutex, 0);
-	    curr_cmd.curr_task = sMainMenu;
 		switch (option) {
 		case (1):
 			printf("option 1");
@@ -490,17 +503,13 @@ void menu_handler(void* params) {
 		case (3):
 			printf("option 3");
 			curr_cmd.action = aNumber3;
-			xTaskNotify(handle_cmd_task, 0, eSetValueWithOverwrite);
-			break;
-		case (4):
-			printf("option 4");
-			xQueueSend(q_print, &waiting_msg, 0);
-			curr_cmd.action = aButtonPress;
+			curr_cmd.next_task = sLedBlink;
 			xTaskNotify(handle_cmd_task, 0, eSetValueWithOverwrite);
 			break;
 		default:
 			xQueueSend(q_print, &inv_msg, 0);
 			curr_cmd.action = aInvalidOption;
+			curr_cmd.next_task = sMainMenu;
 			break;
 		}
 		xTaskNotify(handle_cmd_task, 0, eSetValueWithOverwrite);
@@ -509,6 +518,7 @@ void menu_handler(void* params) {
 		// Wait to run again when another task notifies.
 	}
 }
+
 
 void cmd_handler(void *param) {
 	const char* cmd_msg = " CMD TASK \n\r";
@@ -534,7 +544,6 @@ void cmd_handler(void *param) {
 				curr_cmd.next_task = sAlarm;
 				xTaskNotify(handle_alarm_task, 0, eSetValueWithOverwrite);
 				break;
-				// Unblock alarm task
 			}
 		case sMainMenu:
 			switch (curr_cmd.action) {
@@ -547,13 +556,38 @@ void cmd_handler(void *param) {
 				xTaskNotify(handle_imucalib_task, 0, eSetValueWithOverwrite);
 				break;
 			case aNumber3:
-				curr_cmd.next_task = sNoState;
-				//xTaskNotify(handle_imucalib_task, 0, eSetValueWithOverwrite);
+				curr_cmd.next_task = sLedBlink;
+				xTaskNotify(handle_led_task, 0, eSetValueWithOverwrite);
 				break;
 			}
 		}
 	    xSemaphoreGive(CmdMutex);
+	}
+}
 
+void led_handler(void* parameters) {
+	const char* alarm_msg =  "LED BLINK TASK \n\r";
+
+	while(1) {
+		xTaskNotifyWait(0,0,NULL,portMAX_DELAY);
+		// Print to show entering alarm task
+		xQueueSend(q_print, &alarm_msg, 0);
+	    xSemaphoreTake(CmdMutex, 0);
+		curr_cmd.curr_task = sLedBlink;
+		curr_cmd.action = aLedBlink;
+	    xSemaphoreGive(CmdMutex);
+
+	    // Blink led
+		while (curr_cmd.next_task == sLedBlink) {
+			HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);
+			HAL_Delay(500);
+			HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
+			HAL_Delay(500);
+			if (curr_cmd.action == aButtonPress) {
+				xTaskNotify(handle_menu_task, 0, eSetValueWithOverwrite);
+				break;
+			}
+		}
 	}
 }
 
@@ -568,7 +602,12 @@ void alarm_handler(void* parameters) {
 		curr_cmd.curr_task = sAlarm;
 	    xSemaphoreGive(CmdMutex);
 
+		// Ring alarm
 		while (curr_cmd.next_task == sAlarm) {
+			HAL_GPIO_WritePin(GPIOA, GPIO_PIN_0, GPIO_PIN_SET);
+			HAL_Delay(500);
+			HAL_GPIO_WritePin(GPIOA, GPIO_PIN_0, GPIO_PIN_RESET);
+			HAL_Delay(500);
 			if (curr_cmd.action == aButtonPress) {
 				xTaskNotify(handle_cmd_task, 0, eSetValueWithOverwrite);
 				break;
@@ -593,13 +632,20 @@ void imumeas_handler(void* parameters) {
 		// Print to show entering alarm task
 		xQueueSend(q_print, &imu_msg, NULL);
 	    xSemaphoreTake(CmdMutex, 0);
+
 		curr_cmd.curr_task = sImuMeas;
+		curr_cmd.action = aImuMeas;
+
 	    xSemaphoreGive(CmdMutex);
 
 		while (curr_cmd.next_task == sImuMeas) {
-			xSemaphoreTake(IMUMutex, portMAX_DELAY);
+
+
+			//Measure IMU value
+			xSemaphoreTake(IMUMutex, 0);
 			adxl345_init(&adxl_config);
 			if (adxl345_get_xyz(&adxl_config, RxBuffer) != ADXL_OK) {
+				xSemaphoreGive(IMUMutex);
 			    xSemaphoreTake(CmdMutex, 0);
 				curr_cmd.action = aInvalidImu;
 			    xSemaphoreGive(CmdMutex);
@@ -609,19 +655,25 @@ void imumeas_handler(void* parameters) {
 			}
 			xSemaphoreGive(IMUMutex);
 
+
+			for (int i=0; i<10000; i++);
+
+			//Button-press: return to menu
 			if (curr_cmd.action == aButtonPress) {
 				// aButtonPresss
 				xTaskNotify(handle_menu_task, 0, eSetValueWithOverwrite);
 				break;
 			}
+
+			// sigma-IMU not initialized
 			if ((stdev[0] == 0) && (stdev[1] == 0) && (stdev[2] == 0)) {
-				// sigma-IMU not initialized
 			    xSemaphoreTake(CmdMutex, 0);
 				curr_cmd.action = aInvalidOption;
 			    xSemaphoreGive(CmdMutex);
 				xTaskNotify(handle_menu_task, 0, eSetValueWithOverwrite);
 				break;
 			}
+
 			// stdev = standard deviation * 2.576 (> 99 % confidence interval)
 			if ((abs(avg[0] - RxBuffer[0]) > stdev[0]) || (abs(avg[1] - RxBuffer[1]) > stdev[1]) || (abs(avg[2] - RxBuffer[2]) > stdev[2])) {
 				// DETECTED OFFSET
