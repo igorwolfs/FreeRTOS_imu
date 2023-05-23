@@ -82,12 +82,12 @@ TaskHandle_t handle_led_task;
 SemaphoreHandle_t CmdMutex;
 SemaphoreHandle_t IMUMutex;
 
-QueueHandle_t q_data;
-QueueHandle_t q_print;
+QueueHandle_t q_data;  // Queue used for UART-commands
+QueueHandle_t q_print; // Queue used to print in print_handler
 
-command_t curr_cmd;
+command_t curr_cmd;		// (main.h)
 
-volatile uint8_t user_input;
+volatile uint8_t user_input;	// user_input caught through UART
 BaseType_t status;
 
 adxl_Config_t adxl_config;
@@ -130,6 +130,8 @@ int main(void)
   MX_USART2_UART_Init();
   MX_I2C1_Init();
   /* USER CODE BEGIN 2 */
+
+  // Initiate Tasks
   status = xTaskCreate(menu_handler, "menu_task", 200, NULL, 2, &handle_menu_task);
   configASSERT(status == pdPASS);
   status = xTaskCreate(print_handler, "print_task", 200, NULL, 2, &handle_print_task);
@@ -145,19 +147,23 @@ int main(void)
   status = xTaskCreate(led_handler, "led_task", 200, NULL, 2, &handle_led_task);
   configASSERT(status == pdPASS);
 
-
-  q_print = xQueueCreate(10, sizeof(size_t));
+  // Initiate Queues
+  q_print = xQueueCreate(10, sizeof(size_t)); // Print queue
   configASSERT(q_print != NULL);
-  q_data = xQueueCreate(10, sizeof(uint8_t));
+  q_data = xQueueCreate(10, sizeof(uint8_t)); // UART data queue
   configASSERT(q_data != NULL);
 
+  // Initiate semaphores
   CmdMutex = xSemaphoreCreateMutex();
   xSemaphoreGive(CmdMutex);
   IMUMutex = xSemaphoreCreateMutex();
   xSemaphoreGive(IMUMutex);
 
+
+  // Initiate interrupt
   HAL_UART_Receive_IT(&huart2, &user_input, 1);
 
+  // Start RTOS scheduler
   vTaskStartScheduler();
   /* USER CODE END 2 */
 
@@ -331,60 +337,65 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 
-
+/**
+ * Button interrupt
+*/
 void button_handler(void) {
 	const char* button_msg = "BUTTON HANDLER\n\r";
-	// Set button event
     if ((curr_cmd.action == aImuMeas) || (curr_cmd.action == aImuDetect) || (curr_cmd.action == aLedBlink)) {
-    	curr_cmd.action = aButtonPress;
+		// Set button press event
+		curr_cmd.action = aButtonPress;
     }
     xQueueSendFromISR(q_print, (void*)&button_msg, NULL);
 }
 
-
+/**
+ * UART interrupt
+*/
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
 	const char* uart_msg = "UART HANDLER\n\r";
-
 	xQueueSendFromISR(q_print, (void*)&uart_msg, NULL);
 
     // 1: 49, 2: 50, 3: 51, 4: 52
-
     uint8_t number_rcv = user_input-48;
 
     if ((curr_cmd.action == aInvalidImu) || (curr_cmd.action == aCalibDone) || (curr_cmd.action == aInvalidOption) ||
     		(curr_cmd.action == aButtonPress) || (curr_cmd.action == aInvalidImu)) {
+		// Send char to queue
     	xQueueSendFromISR(q_data, &number_rcv, NULL);
     }
+	// reinitiate interrupt
 	HAL_UART_Receive_IT(&huart2, &user_input, 1);
 }
-
-
 
 void print_handler(void *parameters) {
 	uint32_t *msg;
 	while(1) {
 		xQueueReceive(q_print, &msg, portMAX_DELAY);
+		// Print data over UART
 		HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen((char*)msg),HAL_MAX_DELAY);
 	}
 }
 
 // make a menu here that makes you enter 0 to return
-float stdev[3]={0,0,0};
-float avg[3]={0,0,0};
+float imu_stdev[3]={0,0,0};
+float imu_avg[3]={0,0,0};
 
 void set_imu_default(void) {
-	stdev[0] = stdev[0] < 0.1 ? 0.1 : stdev[0];
-	stdev[1] = stdev[1] < 0.1 ? 0.1 : stdev[1];
-	stdev[2] = stdev[2] < 0.1 ? 0.1 : stdev[2];
+	// Set bounded values for IMU in case of erroneous values.
+	imu_stdev[0] = imu_stdev[0] < 0.1 ? 0.1 : imu_stdev[0];
+	imu_stdev[1] = imu_stdev[1] < 0.1 ? 0.1 : imu_stdev[1];
+	imu_stdev[2] = imu_stdev[2] < 0.1 ? 0.1 : imu_stdev[2];
 
-	stdev[0] = stdev[0] > 0.5 ? 0.1 : stdev[0];
-	stdev[1] = stdev[1] < 0.5 ? 0.1 : stdev[1];
-	stdev[2] = stdev[2] < 0.5 ? 0.1 : stdev[2];
+	imu_stdev[0] = imu_stdev[0] > 0.5 ? 0.1 : imu_stdev[0];
+	imu_stdev[1] = imu_stdev[1] < 0.5 ? 0.1 : imu_stdev[1];
+	imu_stdev[2] = imu_stdev[2] < 0.5 ? 0.1 : imu_stdev[2];
 }
 
+/*
+ * Handles the calibration of the IMU values by setting "imu_avg" and "imu_stdev" values.
+*/
 void imucalib_handler(void* params) {
-	// ask for number of samples or return
-	// read IMU samples
 	const char* calib_msg = "CMD TASK\n\r";
 
 	int n_samples=20;
@@ -397,6 +408,7 @@ void imucalib_handler(void* params) {
 
 	while (1) {
 		xTaskNotifyWait(0,0,NULL,portMAX_DELAY);
+		// Print current state over UART
 		xQueueSend(q_print, &calib_msg,0);
 
 	    xSemaphoreTake(CmdMutex, 0);
@@ -405,12 +417,15 @@ void imucalib_handler(void* params) {
 
 	    // Set vals to zero
 		memset(vals, 0, sizeof(vals));
-		memset(stdev, 0, 3);
-		memset(avg, 0, sizeof(n_samples));
+		memset(imu_stdev, 0, 3);
+		memset(imu_avg, 0, sizeof(n_samples));
 
 		while (curr_cmd.next_task == sImuCalib) {
 			xSemaphoreTake(IMUMutex, 0);
+			// Initialize IMU
 			adxl345_init(&adxl_config);
+
+			// Get IMU measurement
 			if (adxl345_get_xyz(&adxl_config, RxBuffer) != ADXL_OK) {
 				xSemaphoreGive(IMUMutex);
 				xSemaphoreTake(CmdMutex, 0);
@@ -425,35 +440,34 @@ void imucalib_handler(void* params) {
 
 
 			vals[3*idx] = RxBuffer[0];
-			avg[0] += RxBuffer[0];
+			imu_avg[0] += RxBuffer[0];
 			vals[3*idx+1] = RxBuffer[1];
-			avg[1] += RxBuffer[1];
+			imu_avg[1] += RxBuffer[1];
 			vals[3*idx+2] = RxBuffer[2];
-			avg[2] += RxBuffer[2];
+			imu_avg[2] += RxBuffer[2];
 
+			idx++;
 			if (idx >= n_samples) {
-				avg[0] /= n_samples;
-				avg[1] /= n_samples;
-				avg[2] /= n_samples;
+				imu_avg[0] /= n_samples;
+				imu_avg[1] /= n_samples;
+				imu_avg[2] /= n_samples;
 
 				for (int i=0; i<idx; i++) {
-					stdev[0] += (vals[3*i]   - avg[0]);
-					stdev[1] += (vals[3*i+1] - avg[1]);
-					stdev[2] += (vals[3*i+2] - avg[2]);
+					imu_stdev[0] += (vals[3*i]   - imu_avg[0]);
+					imu_stdev[1] += (vals[3*i+1] - imu_avg[1]);
+					imu_stdev[2] += (vals[3*i+2] - imu_avg[2]);
 				}
 
-				stdev[0] /= sqrt(n_samples);
-				stdev[1] /= sqrt(n_samples);
-				stdev[2] /= sqrt(n_samples);
+				imu_stdev[0] /= sqrt(n_samples);
+				imu_stdev[1] /= sqrt(n_samples);
+				imu_stdev[2] /= sqrt(n_samples);
 
-
-				stdev[0] *= 2.576;
-				stdev[0] = abs(stdev[0]);
-				stdev[1] *= 2.576;
-				stdev[1] = abs(stdev[1]);
-				stdev[2] *= 2.576;
-				stdev[2] = abs(stdev[2]);
-
+				imu_stdev[0] *= 2.576;
+				imu_stdev[0] = abs(imu_stdev[0]);
+				imu_stdev[1] *= 2.576;
+				imu_stdev[1] = abs(imu_stdev[1]);
+				imu_stdev[2] *= 2.576;
+				imu_stdev[2] = abs(imu_stdev[2]);
 
 				// In the cases below calibration failed.
 				set_imu_default();
@@ -465,13 +479,16 @@ void imucalib_handler(void* params) {
 				idx=0;
 				break;
 			}
-		idx++;
 		}
 	}
 }
 
+
 const char* inv_msg = "invalid option, try again\n\r";
 const char* waiting_msg = "waiting for input \n\r";
+/**
+ * Handles UART input from UART-interrupt
+*/
 void menu_handler(void* params) {
 	uint8_t option;
 
@@ -483,34 +500,34 @@ void menu_handler(void* params) {
 								"3: LED BLINK\n\r";
 	while (1) {
 	    curr_cmd.curr_task = sMainMenu;
+
+		// Print MENU
 		xQueueSend(q_print, &msg_menu,0);
-		//wait for menu commands
+
+		// Wait for commands from UART through q_data-queue
 		xQueueReceive(q_data, &option, portMAX_DELAY);
 	    xSemaphoreTake(CmdMutex, 0);
 		switch (option) {
-		case (1):
-			printf("option 1");
-			curr_cmd.action = aNumber1;
-			curr_cmd.next_task = sImuMeas;
-			xTaskNotify(handle_cmd_task, 0, eSetValueWithOverwrite);
-			break;
-		case (2):
-			printf("option 2");
-			curr_cmd.action = aNumber2;
-			curr_cmd.next_task = sImuCalib;
-			xTaskNotify(handle_cmd_task, 0, eSetValueWithOverwrite);
-			break;
-		case (3):
-			printf("option 3");
-			curr_cmd.action = aNumber3;
-			curr_cmd.next_task = sLedBlink;
-			xTaskNotify(handle_cmd_task, 0, eSetValueWithOverwrite);
-			break;
-		default:
-			xQueueSend(q_print, &inv_msg, 0);
-			curr_cmd.action = aInvalidOption;
-			curr_cmd.next_task = sMainMenu;
-			break;
+			case (1):
+				curr_cmd.action = aNumber1;
+				curr_cmd.next_task = sImuMeas;
+				xTaskNotify(handle_cmd_task, 0, eSetValueWithOverwrite);
+				break;
+			case (2):
+				curr_cmd.action = aNumber2;
+				curr_cmd.next_task = sImuCalib;
+				xTaskNotify(handle_cmd_task, 0, eSetValueWithOverwrite);
+				break;
+			case (3):
+				curr_cmd.action = aNumber3;
+				curr_cmd.next_task = sLedBlink;
+				xTaskNotify(handle_cmd_task, 0, eSetValueWithOverwrite);
+				break;
+			default:
+				xQueueSend(q_print, &inv_msg, 0);
+				curr_cmd.action = aInvalidOption;
+				curr_cmd.next_task = sMainMenu;
+				break;
 		}
 		xTaskNotify(handle_cmd_task, 0, eSetValueWithOverwrite);
 	    xSemaphoreGive(CmdMutex);
@@ -519,17 +536,17 @@ void menu_handler(void* params) {
 	}
 }
 
-
+/**
+ * Handles state transitions
+*/
 void cmd_handler(void *param) {
-	const char* cmd_msg = " CMD TASK \n\r";
 
 	while(1) {
 		//Implement notify wait
 
 		xTaskNotifyWait(0,0,NULL,portMAX_DELAY);
-		xQueueSend(q_print, &cmd_msg, 0);
 
-			//process the user data(command) stored in input data queue
+		//process the user data(command) stored in input data queue
 	    xSemaphoreTake(CmdMutex, 0);
 		switch (curr_cmd.curr_task) {
 		case sAlarm:
@@ -565,12 +582,16 @@ void cmd_handler(void *param) {
 	}
 }
 
+/**
+ * Blink-led task
+*/
 void led_handler(void* parameters) {
 	const char* alarm_msg =  "LED BLINK TASK \n\r";
 
 	while(1) {
 		xTaskNotifyWait(0,0,NULL,portMAX_DELAY);
-		// Print to show entering alarm task
+
+		// Print current state over UART
 		xQueueSend(q_print, &alarm_msg, 0);
 	    xSemaphoreTake(CmdMutex, 0);
 		curr_cmd.curr_task = sLedBlink;
@@ -579,10 +600,13 @@ void led_handler(void* parameters) {
 
 	    // Blink led
 		while (curr_cmd.next_task == sLedBlink) {
+			// Led ON
 			HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);
 			HAL_Delay(500);
+			// Led OFF
 			HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
 			HAL_Delay(500);
+			// Check for button press (through interrupt)
 			if (curr_cmd.action == aButtonPress) {
 				xTaskNotify(handle_menu_task, 0, eSetValueWithOverwrite);
 				break;
@@ -591,18 +615,22 @@ void led_handler(void* parameters) {
 	}
 }
 
+/**
+ * Handles the activer buzzer
+*/
 void alarm_handler(void* parameters) {
 	const char* alarm_msg =  "ALARM TASK \n\r";
 
 	while(1) {
 		xTaskNotifyWait(0,0,NULL,portMAX_DELAY);
-		// Print to show entering alarm task
+
+		// Print current state over UART
 		xQueueSend(q_print, &alarm_msg, 0);
 	    xSemaphoreTake(CmdMutex, 0);
 		curr_cmd.curr_task = sAlarm;
 	    xSemaphoreGive(CmdMutex);
 
-		// Ring alarm
+		// Ring active buzzer
 		while (curr_cmd.next_task == sAlarm) {
 			HAL_GPIO_WritePin(GPIOA, GPIO_PIN_0, GPIO_PIN_SET);
 			HAL_Delay(500);
@@ -619,6 +647,9 @@ void alarm_handler(void* parameters) {
 
 const char* imu_inv = "INVALID IMU \n\r";
 
+/**
+ * Handles IMU measurement: exits when IMU measurement deviation superseed sigma*2.576
+*/
 void imumeas_handler(void* parameters) {
 	const char* imu_msg = "IMU TASK  \n\r";
 
@@ -629,7 +660,8 @@ void imumeas_handler(void* parameters) {
 	while(1) {
 		//Wait for menu commands
 		xTaskNotifyWait(0,0,NULL,portMAX_DELAY);
-		// Print to show entering alarm task
+
+		// Print current state over UART
 		xQueueSend(q_print, &imu_msg, NULL);
 	    xSemaphoreTake(CmdMutex, 0);
 
@@ -641,7 +673,7 @@ void imumeas_handler(void* parameters) {
 		while (curr_cmd.next_task == sImuMeas) {
 
 
-			//Measure IMU value
+			//Measure and initialize IMU
 			xSemaphoreTake(IMUMutex, 0);
 			adxl345_init(&adxl_config);
 			if (adxl345_get_xyz(&adxl_config, RxBuffer) != ADXL_OK) {
@@ -655,18 +687,18 @@ void imumeas_handler(void* parameters) {
 			}
 			xSemaphoreGive(IMUMutex);
 
-
+			// Introduce delay (for button press)
 			for (int i=0; i<10000; i++);
 
-			//Button-press: return to menu
+			// Button-press: return to menu
 			if (curr_cmd.action == aButtonPress) {
 				// aButtonPresss
 				xTaskNotify(handle_menu_task, 0, eSetValueWithOverwrite);
 				break;
 			}
 
-			// sigma-IMU not initialized
-			if ((stdev[0] == 0) && (stdev[1] == 0) && (stdev[2] == 0)) {
+			// If IMU not calibrated
+			if ((imu_stdev[0] == 0) && (imu_stdev[1] == 0) && (imu_stdev[2] == 0)) {
 			    xSemaphoreTake(CmdMutex, 0);
 				curr_cmd.action = aInvalidOption;
 			    xSemaphoreGive(CmdMutex);
@@ -674,8 +706,8 @@ void imumeas_handler(void* parameters) {
 				break;
 			}
 
-			// stdev = standard deviation * 2.576 (> 99 % confidence interval)
-			if ((abs(avg[0] - RxBuffer[0]) > stdev[0]) || (abs(avg[1] - RxBuffer[1]) > stdev[1]) || (abs(avg[2] - RxBuffer[2]) > stdev[2])) {
+			// If IMU deviation greater than standard deviation * 2.576 (> 99 % confidence interval)
+			if ((abs(imu_avg[0] - RxBuffer[0]) > imu_stdev[0]) || (abs(imu_avg[1] - RxBuffer[1]) > imu_stdev[1]) || (abs(imu_avg[2] - RxBuffer[2]) > imu_stdev[2])) {
 				// DETECTED OFFSET
 			    xSemaphoreTake(CmdMutex, 0);
 				curr_cmd.action = aImuDetect;

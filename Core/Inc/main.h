@@ -46,6 +46,7 @@ extern "C" {
 
 /* Exported types ------------------------------------------------------------*/
 /* USER CODE BEGIN ET */
+// States
 typedef enum {
 	sMainMenu = 0, // Main menu state
 	sImuMeas,	   // IMU measurement state
@@ -54,20 +55,23 @@ typedef enum {
 	sLedBlink,	   // Led blink state
 } state_t;
 
+// Actions
 typedef enum {
-	aButtonPress=0,
-	aImuDetect=1,
+	aButtonPress=0, // Indicates button press interrupt call
+	aImuDetect=1,	// Indicates IMU movement detect in imu-task
+	// Possible UART input states
 	aNumber1,
 	aNumber2,
 	aNumber3,
-	aCalibDone,
-	aInvalidImu,
 	aInvalidOption,
-	aLedBlink,
+	// IMU-states
+	aCalibDone,
 	aImuMeas,
-	aNoAction
+	aInvalidImu,
+	aLedBlink
 } action_t;
 
+// Struct containing curr task, next task and action
 typedef struct {
 	state_t curr_task;
 	state_t next_task;
