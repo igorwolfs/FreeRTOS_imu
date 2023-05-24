@@ -46,6 +46,7 @@ extern "C" {
 
 /* Exported types ------------------------------------------------------------*/
 /* USER CODE BEGIN ET */
+
 // States
 typedef enum {
 	sMainMenu = 0, // Main menu state
@@ -77,6 +78,44 @@ typedef struct {
 	state_t next_task;
 	action_t action;
 } command_t;
+
+
+// Functions
+void menu_handler(void* params);
+void print_handler(void* params);
+void imucalib_handler(void* params);
+void imumeas_handler(void* params);
+void alarm_handler(void* params);
+void cmd_handler(void* params);
+void led_handler(void* params);
+
+// Task Handles
+extern TaskHandle_t handle_menu_task;
+extern TaskHandle_t handle_print_task;
+extern TaskHandle_t handle_imucalib_task;
+extern TaskHandle_t handle_imumeas_task;
+extern TaskHandle_t handle_alarm_task;
+extern TaskHandle_t handle_cmd_task;
+extern TaskHandle_t handle_led_task;
+
+// Queue handles
+extern QueueHandle_t q_data;
+extern QueueHandle_t q_print;
+
+// Mutexes
+extern SemaphoreHandle_t CmdMutex;
+extern SemaphoreHandle_t IMUMutex;
+
+// Typedefs
+extern UART_HandleTypeDef huart2;
+extern I2C_HandleTypeDef hi2c;
+
+// State variables
+extern command_t curr_cmd;
+extern adxl_Config_t adxl_config;
+
+
+//
 
 /* USER CODE END ET */
 
