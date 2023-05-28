@@ -18,5 +18,4 @@ A rough state diagram is shown below:
 ![plot](./images/state_diagram.png)
 
 
-The code itself is documented in-detail.
 If you're an employer or recruiter interested in evaluating my skills, feel free to review the source code & contact me on linkedin.
